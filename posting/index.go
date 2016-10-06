@@ -23,9 +23,11 @@ import (
 
 	"golang.org/x/net/trace"
 
-	"github.com/dgraph-io/dgraph/posting/types"
 	"github.com/dgraph-io/dgraph/schema"
 	"github.com/dgraph-io/dgraph/store"
+	"github.com/dgraph-io/dgraph/types"
+
+	ptypes "github.com/dgraph-io/dgraph/posting/types"
 	"github.com/dgraph-io/dgraph/x"
 )
 
@@ -75,25 +77,31 @@ func processIndexTerm(ctx context.Context, attr string, uid uint64, term []byte,
 		Attribute: attr,
 		Source:    "idx",
 	}
-	key := IndexKey(edge.Attribute, term)
-	plist, decr := GetOrCreate(key, indexStore)
-	defer decr()
-	x.Assertf(plist != nil, "plist is nil [%s] %d %s", key, edge.ValueId, edge.Attribute)
 
-	if del {
-		_, err := plist.AddMutation(ctx, edge, Del)
-		if err != nil {
-			x.TraceError(ctx, x.Wrapf(err, "Error deleting %s for attr %s entity %d: %v",
-				string(term), edge.Attribute, edge.Entity))
+	// Get the tokens from tokenizer and apply indexing on all terms.
+	tokens, err := types.Tokenize(term)
+	x.Assert(err == nil)
+	for _, term := range tokens {
+		key := IndexKey(edge.Attribute, term)
+		plist, decr := GetOrCreate(key, indexStore)
+		defer decr()
+		x.Assertf(plist != nil, "plist is nil [%s] %d %s", key, edge.ValueId, edge.Attribute)
+
+		if del {
+			_, err := plist.AddMutation(ctx, edge, Del)
+			if err != nil {
+				x.TraceError(ctx, x.Wrapf(err, "Error deleting %s for attr %s entity %d: %v",
+					string(term), edge.Attribute, edge.Entity))
+			}
+			indexLog.Printf("DEL [%s] [%d] OldTerm [%s]", edge.Attribute, edge.Entity, string(term))
+		} else {
+			_, err := plist.AddMutation(ctx, edge, Set)
+			if err != nil {
+				x.TraceError(ctx, x.Wrapf(err, "Error adding %s for attr %s entity %d: %v",
+					string(term), edge.Attribute, edge.Entity))
+			}
+			indexLog.Printf("SET [%s] [%d] NewTerm [%s]", edge.Attribute, edge.Entity, string(term))
 		}
-		indexLog.Printf("DEL [%s] [%d] OldTerm [%s]", edge.Attribute, edge.Entity, string(term))
-	} else {
-		_, err := plist.AddMutation(ctx, edge, Set)
-		if err != nil {
-			x.TraceError(ctx, x.Wrapf(err, "Error adding %s for attr %s entity %d: %v",
-				string(term), edge.Attribute, edge.Entity))
-		}
-		indexLog.Printf("SET [%s] [%d] NewTerm [%s]", edge.Attribute, edge.Entity, string(term))
 	}
 }
 
@@ -102,7 +110,7 @@ func (l *List) AddMutationWithIndex(ctx context.Context, t x.DirectedEdge, op by
 	x.Assertf(len(t.Attribute) > 0 && t.Attribute[0] != indexRune,
 		"[%s] [%d] [%s] %d %d\n", t.Attribute, t.Entity, string(t.Value), t.ValueId, op)
 
-	var lastPost types.Posting
+	var lastPost ptypes.Posting
 	var hasLastPost bool
 	doUpdateIndex := indexStore != nil && (t.Value != nil) && schema.IsIndexed(t.Attribute)
 	if doUpdateIndex {
